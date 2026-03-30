@@ -20,7 +20,7 @@ POLL_INTERVAL = 3  # seconds
 MAX_POLL_ATTEMPTS = 60  # max ~3 minutes
 
 # Seedream model ID (from official BytePlus docs)
-SEEDREAM_MODEL = "seedream-5-0-lite-260128"
+SEEDREAM_MODEL = "seedream-5-0-260128"
 
 
 async def _image_url_to_base64(image_url: str) -> str:
