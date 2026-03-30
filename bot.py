@@ -336,7 +336,7 @@ async def size_selected(callback: CallbackQuery, state: FSMContext):
             f"Товаров: {len(products)}\n\n"
             f"✅ Шаг 1/3: Товары спарсены\n"
             f"✅ Шаг 2/3: Промпт и тексты готовы\n"
-            f"Шаг 3/3: Генерация изображения (Seedream 4.5)...",
+            f"Шаг 3/3: Генерация изображения (Seedream 5.0)...",
             chat_id=status_msg.chat.id,
             message_id=status_msg.message_id,
             parse_mode="HTML",

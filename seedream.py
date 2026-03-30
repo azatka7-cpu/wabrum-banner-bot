@@ -1,32 +1,27 @@
 """
-Seedream 5.0 Lite API integration via BytePlus.
+Seedream 5.0 Lite API integration via BytePlus (official SDK).
 Supports text-to-image with multiple reference images (up to 14).
 """
 
-import asyncio
 import base64
 import logging
-from io import BytesIO
 
 import aiohttp
+from byteplussdkarkruntime import AsyncArk
 
 from config import BYTEPLUS_API_KEY, BYTEPLUS_ENDPOINT
 from parser import download_image
 
 logger = logging.getLogger(__name__)
 
-# BytePlus task polling settings
-POLL_INTERVAL = 3  # seconds
-MAX_POLL_ATTEMPTS = 60  # max ~3 minutes
-
 # Seedream model ID (from official BytePlus docs)
 SEEDREAM_MODEL = "seedream-5-0-260128"
 
 
 async def _image_url_to_base64(image_url: str) -> str:
-    """Download an image and return its base64-encoded string."""
+    """Download an image and return its base64-encoded data URI string."""
     image_bytes = await download_image(image_url)
-    return base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
 
 
 async def generate_banner(
@@ -46,17 +41,13 @@ async def generate_banner(
     Returns:
         Generated image as bytes
     """
-    headers = {
-        "Authorization": f"Bearer {BYTEPLUS_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
     # Prepare reference images (max 14 per API docs)
+    ref_urls = image_urls[:14]
     reference_images = []
-    for url in image_urls[:14]:
+    for url in ref_urls:
         try:
-            b64 = await _image_url_to_base64(url)
-            reference_images.append(b64)
+            b64_uri = await _image_url_to_base64(url)
+            reference_images.append(b64_uri)
             logger.info("Downloaded reference image: %s", url[:80])
         except Exception as e:
             logger.warning("Failed to download reference image %s: %s", url[:80], e)
@@ -71,22 +62,6 @@ async def generate_banner(
     else:
         enhanced_prompt = prompt
 
-    # Build request payload (only documented parameters)
-    payload = {
-        "model": SEEDREAM_MODEL,
-        "prompt": enhanced_prompt,
-        "size": size,
-        "sequential_image_generation": "disabled",
-        "response_format": "url",
-        "watermark": False,
-    }
-
-    # Add reference images if available
-    if reference_images:
-        payload["image"] = [
-            f"data:image/jpeg;base64,{img}" for img in reference_images
-        ]
-
     logger.info(
         "Calling Seedream API: model=%s, size=%s, refs=%d, prompt_len=%d",
         SEEDREAM_MODEL,
@@ -95,94 +70,54 @@ async def generate_banner(
         len(enhanced_prompt),
     )
 
-    async with aiohttp.ClientSession() as session:
-        # Submit generation task
-        async with session.post(
-            BYTEPLUS_ENDPOINT,
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
-            result = await resp.json()
+    # Determine base URL: strip /images/generations suffix if present in BYTEPLUS_ENDPOINT
+    base_url = BYTEPLUS_ENDPOINT
+    for suffix in ("/images/generations", "/images/generations/"):
+        if base_url.endswith(suffix):
+            base_url = base_url[: -len(suffix)]
+            break
 
-            if resp.status != 200:
-                error_msg = result.get("error", result.get("message", "Unknown error"))
-                raise RuntimeError(f"Seedream API error ({resp.status}): {error_msg}")
+    client = AsyncArk(
+        base_url=base_url,
+        api_key=BYTEPLUS_API_KEY,
+    )
 
-        # Check if result is immediate or async
-        if "data" in result and result["data"]:
-            # Immediate result
-            return await _extract_image(result, session)
+    try:
+        kwargs = {
+            "model": SEEDREAM_MODEL,
+            "prompt": enhanced_prompt,
+            "size": size,
+            "response_format": "url",
+            "watermark": False,
+        }
 
-        # Async task — poll for completion
-        task_id = result.get("task_id") or result.get("id")
-        if not task_id:
-            raise RuntimeError(f"No task_id in Seedream response: {result}")
+        # Add reference images if available (as base64 data URIs)
+        if reference_images:
+            kwargs["image"] = reference_images
 
-        logger.info("Seedream task submitted: %s, polling for result...", task_id)
-        return await _poll_task(session, headers, task_id)
+        result = await client.images.generate(**kwargs)
 
+        # Extract image from SDK response
+        if result.data and len(result.data) > 0:
+            item = result.data[0]
 
-async def _poll_task(
-    session: aiohttp.ClientSession,
-    headers: dict,
-    task_id: str,
-) -> bytes:
-    """Poll BytePlus for task completion."""
-    status_url = BYTEPLUS_ENDPOINT.rsplit("/", 1)[0] + f"/tasks/{task_id}"
+            # Option 1: Image URL
+            if item.url:
+                logger.info("Downloading generated banner from URL")
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        item.url,
+                        timeout=aiohttp.ClientTimeout(total=60),
+                    ) as resp:
+                        resp.raise_for_status()
+                        return await resp.read()
 
-    for attempt in range(MAX_POLL_ATTEMPTS):
-        await asyncio.sleep(POLL_INTERVAL)
+            # Option 2: Base64 encoded
+            if item.b64_json:
+                logger.info("Decoding base64 banner image")
+                return base64.b64decode(item.b64_json)
 
-        async with session.get(
-            status_url,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            result = await resp.json()
+        raise RuntimeError("No image data in Seedream response")
 
-        status = result.get("status", "").lower()
-        logger.debug("Task %s status: %s (attempt %d)", task_id, status, attempt + 1)
-
-        if status in ("completed", "succeeded", "success"):
-            return await _extract_image(result, session)
-        elif status in ("failed", "error", "cancelled"):
-            error = result.get("error", result.get("message", "Unknown"))
-            raise RuntimeError(f"Seedream task failed: {error}")
-
-    raise TimeoutError(f"Seedream task {task_id} timed out after {MAX_POLL_ATTEMPTS * POLL_INTERVAL}s")
-
-
-async def _extract_image(result: dict, session: aiohttp.ClientSession) -> bytes:
-    """Extract image bytes from API response (URL or base64)."""
-    data = result.get("data", [])
-    if isinstance(data, list) and data:
-        item = data[0]
-    elif isinstance(data, dict):
-        item = data
-    else:
-        # Try alternative response structures
-        images = result.get("images", result.get("output", {}).get("images", []))
-        if images:
-            item = images[0] if isinstance(images, list) else images
-        else:
-            raise RuntimeError(f"No image data in response: {list(result.keys())}")
-
-    # Option 1: Image URL
-    image_url = item.get("url") or item.get("image_url")
-    if image_url:
-        logger.info("Downloading generated banner from URL")
-        async with session.get(
-            image_url,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.read()
-
-    # Option 2: Base64 encoded
-    b64_data = item.get("b64_json") or item.get("base64") or item.get("data")
-    if b64_data:
-        logger.info("Decoding base64 banner image")
-        return base64.b64decode(b64_data)
-
-    raise RuntimeError(f"Could not extract image from response item: {list(item.keys())}")
+    finally:
+        await client.close()
