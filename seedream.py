@@ -1,5 +1,5 @@
 """
-Seedream 5.0 Lite API integration via BytePlus (official SDK).
+Seedream 5.0 Lite API integration via BytePlus.
 Supports text-to-image with multiple reference images (up to 14).
 """
 
@@ -7,21 +7,16 @@ import base64
 import logging
 
 import aiohttp
-from byteplussdkarkruntime import AsyncArk
 
-from config import BYTEPLUS_API_KEY, BYTEPLUS_ENDPOINT
-from parser import download_image
+from config import BYTEPLUS_API_KEY
 
 logger = logging.getLogger(__name__)
 
 # Seedream model ID (from official BytePlus docs)
 SEEDREAM_MODEL = "seedream-5-0-260128"
 
-
-async def _image_url_to_base64(image_url: str) -> str:
-    """Download an image and return its base64-encoded data URI string."""
-    image_bytes = await download_image(image_url)
-    return f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+# Official BytePlus API endpoint
+API_URL = "https://ark.ap-southeast.bytepluses.com/api/v3/images/generations"
 
 
 async def generate_banner(
@@ -36,88 +31,92 @@ async def generate_banner(
         prompt: The image generation prompt
         image_urls: List of reference image URLs (product photos, max 14)
         size: Target pixel size (e.g., "2560x1440", "2048x2048")
-              Must satisfy: total pixels in [3,686,400 .. 10,404,496]
+              Must satisfy: total pixels in [3,686,400 .. 16,777,216]
 
     Returns:
         Generated image as bytes
     """
-    # Prepare reference images (max 14 per API docs)
     ref_urls = image_urls[:14]
-    reference_images = []
-    for url in ref_urls:
-        try:
-            b64_uri = await _image_url_to_base64(url)
-            reference_images.append(b64_uri)
-            logger.info("Downloaded reference image: %s", url[:80])
-        except Exception as e:
-            logger.warning("Failed to download reference image %s: %s", url[:80], e)
 
     # Build the prompt with composition instructions for multi-product banners
-    if len(reference_images) > 1:
+    if len(ref_urls) > 1:
         enhanced_prompt = (
-            f"Create a professional e-commerce banner compositing {len(reference_images)} "
+            f"Create a professional e-commerce banner compositing {len(ref_urls)} "
             f"product items from the reference images into one cohesive scene. "
             f"{prompt}"
         )
     else:
         enhanced_prompt = prompt
 
+    # Build request payload — matches official curl example exactly
+    payload = {
+        "model": SEEDREAM_MODEL,
+        "prompt": enhanced_prompt,
+        "size": size,
+        "response_format": "url",
+        "watermark": False,
+        "sequential_image_generation": "disabled",
+    }
+
+    # Add reference images as direct URLs (API accepts accessible URLs)
+    if len(ref_urls) == 1:
+        payload["image"] = ref_urls[0]
+    elif len(ref_urls) > 1:
+        payload["image"] = ref_urls
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {BYTEPLUS_API_KEY}",
+    }
+
     logger.info(
-        "Calling Seedream API: model=%s, size=%s, refs=%d, prompt_len=%d",
+        "Calling Seedream API: url=%s, model=%s, size=%s, refs=%d, prompt_len=%d",
+        API_URL,
         SEEDREAM_MODEL,
         size,
-        len(reference_images),
+        len(ref_urls),
         len(enhanced_prompt),
     )
 
-    # Determine base URL: strip /images/generations suffix if present in BYTEPLUS_ENDPOINT
-    base_url = BYTEPLUS_ENDPOINT
-    for suffix in ("/images/generations", "/images/generations/"):
-        if base_url.endswith(suffix):
-            base_url = base_url[: -len(suffix)]
-            break
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            API_URL,
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as resp:
+            result = await resp.json()
 
-    client = AsyncArk(
-        base_url=base_url,
-        api_key=BYTEPLUS_API_KEY,
-    )
+            if resp.status != 200:
+                error_msg = result.get("error", result.get("message", "Unknown error"))
+                raise RuntimeError(f"Seedream API error ({resp.status}): {error_msg}")
 
-    try:
-        kwargs = {
-            "model": SEEDREAM_MODEL,
-            "prompt": enhanced_prompt,
-            "size": size,
-            "response_format": "url",
-            "watermark": False,
-        }
+        # Extract image from response
+        data = result.get("data", [])
+        if not data:
+            raise RuntimeError(f"No image data in Seedream response: {result}")
 
-        # Add reference images if available (as base64 data URIs)
-        if reference_images:
-            kwargs["image"] = reference_images
+        item = data[0]
 
-        result = await client.images.generate(**kwargs)
+        # Check for per-image error
+        if "error" in item and item["error"]:
+            raise RuntimeError(f"Seedream image generation failed: {item['error']}")
 
-        # Extract image from SDK response
-        if result.data and len(result.data) > 0:
-            item = result.data[0]
+        # Option 1: Image URL
+        image_url = item.get("url")
+        if image_url:
+            logger.info("Downloading generated banner from URL")
+            async with session.get(
+                image_url,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as img_resp:
+                img_resp.raise_for_status()
+                return await img_resp.read()
 
-            # Option 1: Image URL
-            if item.url:
-                logger.info("Downloading generated banner from URL")
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        item.url,
-                        timeout=aiohttp.ClientTimeout(total=60),
-                    ) as resp:
-                        resp.raise_for_status()
-                        return await resp.read()
+        # Option 2: Base64 encoded
+        b64_data = item.get("b64_json")
+        if b64_data:
+            logger.info("Decoding base64 banner image")
+            return base64.b64decode(b64_data)
 
-            # Option 2: Base64 encoded
-            if item.b64_json:
-                logger.info("Decoding base64 banner image")
-                return base64.b64decode(item.b64_json)
-
-        raise RuntimeError("No image data in Seedream response")
-
-    finally:
-        await client.close()
+        raise RuntimeError(f"No image URL or b64_json in response item: {item}")
