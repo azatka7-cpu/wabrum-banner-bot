@@ -89,7 +89,11 @@ async def generate_banner(
 
             if resp.status != 200:
                 error_msg = result.get("error", result.get("message", "Unknown error"))
-                raise RuntimeError(f"Seedream API error ({resp.status}): {error_msg}")
+                raise RuntimeError(
+                    f"Seedream API error ({resp.status}): {error_msg}\n"
+                    f"[DEBUG] url={API_URL}, model={SEEDREAM_MODEL}, "
+                    f"key={BYTEPLUS_API_KEY[:8]}..., size={size}"
+                )
 
         # Extract image from response
         data = result.get("data", [])
