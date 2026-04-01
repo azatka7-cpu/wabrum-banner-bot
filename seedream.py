@@ -78,7 +78,7 @@ async def generate_banner(
 
         # Synchronous response with data
         if "data" in result and result["data"]:
-            return _extract_image(result["data"][0], session)
+            return await _extract_image(result["data"][0], session)
 
         # Async response with task_id — poll for result
         task_id = result.get("task_id")
