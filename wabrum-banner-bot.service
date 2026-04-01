@@ -1,0 +1,15 @@
+[Unit]
+Description=Wabrum Banner Bot
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/wabrum-banner-bot
+ExecStart=/opt/wabrum-banner-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/wabrum-banner-bot/.env
+
+[Install]
+WantedBy=multi-user.target
