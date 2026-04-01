@@ -412,7 +412,7 @@ async def _run_generation(
         except Exception:
             pass
 
-        # Send result
+        # Send result (with retry for stale Telegram connections)
         title_ru = escape(content["title_ru"])
         title_tk = escape(content["title_tk"])
         desc_ru = escape(content["description_ru"])
@@ -427,28 +427,37 @@ async def _run_generation(
             f"\U0001f4c4 Description (TK):\n<code>{desc_tk}</code>"
         )
 
-        await message.answer_photo(
-            photo=BufferedInputFile(banner_bytes, filename="banner.jpg"),
-            caption=caption,
-            parse_mode="HTML",
-        )
-
-        # Debug message with prompt
         seedream_prompt_escaped = escape(content["seedream_prompt"])
         product_links = "\n".join(f"- {escape(p.url)}" for p in products)
 
-        await message.answer(
-            f"\U0001f50d <b>Seedream \u043f\u0440\u043e\u043c\u043f\u0442:</b>\n<pre>{seedream_prompt_escaped}</pre>\n\n"
-            f"\U0001f517 <b>\u0422\u043e\u0432\u0430\u0440\u044b:</b>\n{product_links}",
-            parse_mode="HTML",
-        )
+        async def _send_results() -> None:
+            await message.answer_photo(
+                photo=BufferedInputFile(banner_bytes, filename="banner.jpg"),
+                caption=caption,
+                parse_mode="HTML",
+            )
 
-        # Regeneration keyboard
-        await message.answer(
-            "\U0001f504 <b>\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0432 \u0434\u0440\u0443\u0433\u043e\u043c \u0440\u0430\u0437\u043c\u0435\u0440\u0435:</b>",
-            parse_mode="HTML",
-            reply_markup=regenerate_keyboard(),
-        )
+            await message.answer(
+                f"\U0001f50d <b>Seedream \u043f\u0440\u043e\u043c\u043f\u0442:</b>\n<pre>{seedream_prompt_escaped}</pre>\n\n"
+                f"\U0001f517 <b>\u0422\u043e\u0432\u0430\u0440\u044b:</b>\n{product_links}",
+                parse_mode="HTML",
+            )
+
+            await message.answer(
+                "\U0001f504 <b>\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0432 \u0434\u0440\u0443\u0433\u043e\u043c \u0440\u0430\u0437\u043c\u0435\u0440\u0435:</b>",
+                parse_mode="HTML",
+                reply_markup=regenerate_keyboard(),
+            )
+
+        for _attempt in range(3):
+            try:
+                await _send_results()
+                break
+            except (aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError) as exc:
+                if _attempt == 2:
+                    raise
+                logger.warning("Telegram send failed (attempt %d/3), retrying: %s", _attempt + 1, exc)
+                await asyncio.sleep(1)
 
         await state.set_state(None)
 
