@@ -10,7 +10,7 @@ from config import BYTEPLUS_API_KEY, BYTEPLUS_ENDPOINT, BannerSize
 
 logger = logging.getLogger(__name__)
 
-SEEDREAM_MODEL = "seedream-5-0-lite"
+SEEDREAM_MODEL = "seedream-5-0-260128"
 POLL_INTERVAL = 3
 MAX_POLL_ATTEMPTS = 60
 
